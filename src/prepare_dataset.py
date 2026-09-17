@@ -10,8 +10,10 @@ bounding rect наибольшего связного компонента. Ес
 удалась (нет зелёного объекта, шум) — используется bbox на центральные
 90% кадра как безопасный fallback.
 
-Классы = вид сорняка (3 шт.), фаза роста в имя класса не включается,
-т.к. в ТЗ требуется "количество каждого вида сорняка".
+Классы = "<вид сорняка> / <фаза роста>" (растение + стадия вегетации в
+одном классе детектора), чтобы по одной детекции сразу было известно и
+что за сорняк, и в какой фазе он находится — это нужно для подбора
+обработки (см. src/weed_info.py).
 """
 import cv2
 import numpy as np
@@ -25,7 +27,22 @@ OUT_DIR = Path(__file__).resolve().parent.parent / "data"
 VAL_FRACTION = 0.15
 SEED = 42
 
-CLASS_NAMES = sorted([p.name for p in RAW_DIR.iterdir() if p.is_dir()])
+CLASS_SEP = " / "
+
+
+def _discover_classes():
+    classes = []
+    for species_dir in sorted(RAW_DIR.iterdir()):
+        if not species_dir.is_dir():
+            continue
+        for stage_dir in sorted(species_dir.iterdir()):
+            if not stage_dir.is_dir():
+                continue
+            classes.append(f"{species_dir.name}{CLASS_SEP}{stage_dir.name}")
+    return classes
+
+
+CLASS_NAMES = _discover_classes()
 
 
 def imread_unicode(path):
@@ -88,11 +105,13 @@ def to_yolo_line(class_id, x1, y1, x2, y2, w, h):
 
 def collect_images():
     items = []
-    for class_name in CLASS_NAMES:
-        class_dir = RAW_DIR / class_name
-        for stage_dir in class_dir.iterdir():
+    for species_dir in sorted(RAW_DIR.iterdir()):
+        if not species_dir.is_dir():
+            continue
+        for stage_dir in sorted(species_dir.iterdir()):
             if not stage_dir.is_dir():
                 continue
+            class_name = f"{species_dir.name}{CLASS_SEP}{stage_dir.name}"
             for img_path in stage_dir.glob("*.jpg"):
                 items.append((img_path, class_name))
     return items
@@ -133,7 +152,8 @@ def main():
             class_id = CLASS_NAMES.index(cls)
             line = to_yolo_line(class_id, x1, y1, x2, y2, w, h)
 
-            stem = f"{cls}__{img_path.stem}".replace(" ", "_")
+            safe_cls = cls.replace(CLASS_SEP, "_").replace(" ", "_")
+            stem = f"{safe_cls}__{img_path.stem}"
             out_img = OUT_DIR / "images" / split / f"{stem}.jpg"
             out_lbl = OUT_DIR / "labels" / split / f"{stem}.txt"
             shutil.copy(img_path, out_img)

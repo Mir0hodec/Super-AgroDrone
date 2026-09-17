@@ -1,13 +1,11 @@
 """
-Web-демо детекции сорняков: фото/снимок с дрона + live-видео (веб-камера,
-карта видеозахвата, видеофайл — имитация наземного приёма сигнала с DJI O4).
+Web-демо детекции сорняков на снимках с дрона: вид сорняка, фаза
+вегетации, количество, % засорённости и рекомендация по обработке.
 
 Запуск:
     streamlit run app.py
 """
 import sys
-import tempfile
-import time
 from pathlib import Path
 
 import cv2
@@ -19,6 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from inference import load_class_names, load_model, run_inference  # noqa: E402
 from visualize import color_for_class  # noqa: E402
+from weed_info import get_recommendation, split_class_name  # noqa: E402
 
 st.set_page_config(page_title="AgroDrone Weed Detector", page_icon="🌾", layout="wide")
 
@@ -37,18 +36,8 @@ CUSTOM_CSS = """
     box-shadow: 0 10px 30px rgba(0,0,0,0.35);
     border: 1px solid rgba(255,255,255,0.08);
 }
-.hero h1 {
-    margin: 0;
-    font-size: 2.1rem;
-    color: #ffffff;
-    letter-spacing: -0.01em;
-}
-.hero p {
-    margin: 8px 0 0;
-    color: #d9ffe6;
-    font-size: 0.98rem;
-    max-width: 760px;
-}
+.hero h1 { margin: 0; font-size: 2.1rem; color: #ffffff; letter-spacing: -0.01em; }
+.hero p { margin: 8px 0 0; color: #d9ffe6; font-size: 0.98rem; max-width: 760px; }
 .hero .badge-row { margin-top: 14px; display:flex; gap:10px; flex-wrap:wrap; }
 .pill {
     display: inline-block;
@@ -71,37 +60,42 @@ CUSTOM_CSS = """
 [data-testid="stMetricValue"] { color: #f2fff6 !important; }
 
 .class-badge {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 7px 12px;
-    border-radius: 12px;
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 12px; border-radius: 12px;
     background: rgba(255,255,255,0.04);
     border: 1px solid rgba(255,255,255,0.07);
-    margin-bottom: 7px;
-    font-size: 0.86rem;
+    margin-bottom: 7px; font-size: 0.86rem;
 }
-.class-dot {
-    width: 11px; height: 11px; border-radius: 50%;
-    box-shadow: 0 0 6px rgba(0,0,0,0.4);
-    flex-shrink: 0;
-}
+.class-dot { width: 11px; height: 11px; border-radius: 50%; box-shadow: 0 0 6px rgba(0,0,0,0.4); flex-shrink: 0; }
 
-.section-title {
-    font-size: 1.05rem;
-    font-weight: 700;
-    margin: 6px 0 12px;
-    color: #eafff2;
-}
+.section-title { font-size: 1.05rem; font-weight: 700; margin: 6px 0 12px; color: #eafff2; }
 
-.arch-box {
-    background: rgba(43,171,102,0.08);
-    border: 1px dashed #2bab66;
-    border-radius: 14px;
+.rec-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-left: 4px solid var(--accent, #2bab66);
+    border-radius: 12px;
     padding: 14px 18px;
-    font-size: 0.86rem;
-    color: #cfead9;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
+}
+.rec-card .rec-title { font-weight: 700; font-size: 0.98rem; color: #f2fff6; margin-bottom: 2px; }
+.rec-card .rec-sub { font-size: 0.8rem; color: #9fd9b4; margin-bottom: 8px; }
+.rec-card .rec-herb { font-size: 0.85rem; color: #eafff2; margin-bottom: 6px; }
+.rec-card .rec-note { font-size: 0.82rem; color: #b8ccbe; }
+.herb-tag {
+    display: inline-block; padding: 3px 10px; margin: 2px 4px 2px 0;
+    border-radius: 999px; background: rgba(43,171,102,0.18);
+    border: 1px solid rgba(43,171,102,0.4); font-size: 0.78rem; color: #d3ffe3;
+}
+
+.disclaimer {
+    background: rgba(255,193,7,0.08);
+    border: 1px dashed #d4a017;
+    border-radius: 12px;
+    padding: 10px 16px;
+    font-size: 0.8rem;
+    color: #e9d6a0;
+    margin-top: 6px;
 }
 </style>
 """
@@ -112,13 +106,14 @@ st.markdown(
     """
     <div class="hero">
         <h1>🌾 AgroDrone Weed Detector</h1>
-        <p>Детекция сорняков на снимках и видео с дрона: тайловый инференс для больших
-        UAV-кадров, распознавание по видам, оценка засорённости поля.</p>
+        <p>Дрон фотографирует поле → снимок передаётся на компьютер → модель определяет
+        вид сорняка, фазу вегетации, количество, % засорённости и даёт рекомендацию
+        по обработке.</p>
         <div class="badge-row">
             <span class="pill">YOLOv8</span>
             <span class="pill">Tiled UAV inference</span>
-            <span class="pill">Live video</span>
-            <span class="pill">DJI O4 ground-station совместимо</span>
+            <span class="pill">Вид + фаза вегетации</span>
+            <span class="pill">Рекомендации по обработке</span>
         </div>
     </div>
     """,
@@ -168,7 +163,7 @@ with st.sidebar:
         tile_size, overlap = 640, 0.2
 
     st.markdown("---")
-    st.markdown("### 🌿 Классы")
+    st.markdown("### 🌿 Классы (вид / фаза)")
     for i, name in enumerate(class_names):
         r, g, b = color_for_class(i)[::-1]  # BGR -> RGB
         st.markdown(
@@ -178,196 +173,79 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
+uploaded = st.file_uploader("Снимок с дрона", type=["jpg", "jpeg", "png"])
 
-def render_stats(stats, elapsed, n_tiles):
+if uploaded is not None:
+    file_bytes = np.frombuffer(uploaded.read(), np.uint8)
+    image_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+    if image_bgr is None:
+        st.error("Не удалось декодировать изображение.")
+        st.stop()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("<div class='section-title'>Оригинал</div>", unsafe_allow_html=True)
+        st.image(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+    with st.spinner("Выполняется инференс..."):
+        annotated, stats, elapsed, n_tiles = run_inference(
+            model, class_names, image_bgr,
+            mode=mode, conf=conf, tile_size=tile_size, overlap=overlap,
+        )
+
+    with col2:
+        st.markdown("<div class='section-title'>Результат детекции</div>", unsafe_allow_html=True)
+        st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("<div class='section-title'>Статистика</div>", unsafe_allow_html=True)
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total detections", stats["total"])
     m2.metric("Weed coverage %", f"{stats['coverage_pct']:.1f}%")
     m3.metric("Время обработки", f"{elapsed:.2f} с")
     m4.metric("Тайлов обработано", n_tiles)
 
-    st.markdown("<div class='section-title'>Количество по видам сорняков</div>",
+    st.markdown("<div class='section-title'>Количество по видам / фазам</div>",
                 unsafe_allow_html=True)
-    cols = st.columns(max(1, len(class_names)))
-    for i, name in enumerate(class_names):
-        cols[i].metric(name, stats["counts"].get(name, 0))
+    present = [name for name in class_names if stats["counts"].get(name, 0) > 0]
+    if present:
+        cols = st.columns(max(1, len(present)))
+        for i, name in enumerate(present):
+            cols[i].metric(name, stats["counts"][name])
+    else:
+        st.info("Сорняки не обнаружены при текущем пороге confidence.")
 
-
-tab_photo, tab_video, tab_about = st.tabs(
-    ["📷 Фото / снимок", "🎥 Видео / камера (наземная станция)", "ℹ️ Архитектура для дрона"]
-)
-
-# ---------------------------------------------------------------- Фото ----
-with tab_photo:
-    uploaded = st.file_uploader("Изображение", type=["jpg", "jpeg", "png"])
-
-    if uploaded is not None:
-        file_bytes = np.frombuffer(uploaded.read(), np.uint8)
-        image_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-        if image_bgr is None:
-            st.error("Не удалось декодировать изображение.")
-            st.stop()
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("<div class='section-title'>Оригинал</div>", unsafe_allow_html=True)
-            st.image(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), use_container_width=True)
-
-        with st.spinner("Выполняется инференс..."):
-            annotated, stats, elapsed, n_tiles = run_inference(
-                model, class_names, image_bgr,
-                mode=mode, conf=conf, tile_size=tile_size, overlap=overlap,
+    if present:
+        st.markdown("<div class='section-title'>🧪 Рекомендации по обработке</div>",
+                    unsafe_allow_html=True)
+        for name in present:
+            rec = get_recommendation(name)
+            species, stage = split_class_name(name)
+            class_id = class_names.index(name)
+            r, g, b = color_for_class(class_id)[::-1]
+            herb_tags = "".join(f"<span class='herb-tag'>{h}</span>" for h in rec["herbicides"]) \
+                or "<span class='herb-tag'>нет данных</span>"
+            st.markdown(
+                f"""
+                <div class="rec-card" style="--accent: rgb({r},{g},{b});">
+                    <div class="rec-title">{species} — {stats['counts'][name]} шт.
+                        <span style="font-weight:400; color:#9fd9b4;">
+                        (фаза: {stage or '—'}, {rec['type']})</span>
+                    </div>
+                    <div class="rec-sub">Рекомендуемые группы гербицидов:</div>
+                    <div class="rec-herb">{herb_tags}</div>
+                    <div class="rec-note">{rec['note']}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-
-        with col2:
-            st.markdown("<div class='section-title'>Результат детекции</div>", unsafe_allow_html=True)
-            st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), use_container_width=True)
-
-        st.markdown("---")
-        render_stats(stats, elapsed, n_tiles)
-    else:
-        st.info("Загрузите изображение, чтобы запустить детекцию.")
-
-# --------------------------------------------------------------- Видео ----
-with tab_video:
-    st.markdown(
-        """
-        <div class="arch-box">
-        🛰️ <b>DJI O4 передаёт только картинку</b> (это видеоканал, не компьютер).
-        На реальном полёте наземная станция (ноутбук с картой видеозахвата HDMI/USB,
-        подключённой к пульту/очкам, либо поток из DJI SDK) видит этот сигнал как
-        обычное видео-устройство или видеофайл — ровно то, что принимает этот режим.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    source_type = st.radio("Источник видео", ["Видеофайл", "Камера / карта видеозахвата"],
-                            horizontal=True)
-
-    if source_type == "Видеофайл":
-        video_file = st.file_uploader("Видео", type=["mp4", "mov", "avi", "mkv"],
-                                       key="video_upload")
-        video_source = None
-        if video_file is not None:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(video_file.name).suffix)
-            tmp.write(video_file.read())
-            tmp.close()
-            video_source = tmp.name
-    else:
-        device_index = st.text_input(
-            "Индекс видеоустройства",
-            value="0",
-            help="Номер камеры/карты видеозахвата в системе (обычно 0 — первое "
-                 "подключённое устройство). Карта захвата с HDMI-выхода пульта/очков "
-                 "DJI определяется системой так же, как веб-камера.",
+        st.markdown(
+            "<div class='disclaimer'>⚠️ Это общая агрономическая справка для демо, "
+            "не инструкция по применению конкретного препарата. Перед обработкой "
+            "сверяйтесь с этикеткой препарата и действующими регламентами.</div>",
+            unsafe_allow_html=True,
         )
-        video_source = int(device_index) if device_index.strip().isdigit() else device_index
-
-    c1, c2 = st.columns(2)
-    frame_skip = c1.number_input("Обрабатывать каждый N-й кадр", min_value=1, max_value=60,
-                                  value=5, help="Больше N — быстрее, но реже обновление.")
-    max_frames = c2.number_input("Максимум кадров за сеанс", min_value=1, max_value=300,
-                                  value=20, help="Ограничение на CPU, чтобы сеанс не висел бесконечно.")
-
-    start = st.button("▶ Запустить сеанс детекции", type="primary")
-
-    if start:
-        if video_source is None:
-            st.warning("Сначала выберите видеофайл или укажите камеру.")
-        else:
-            cap = cv2.VideoCapture(video_source)
-            if not cap.isOpened():
-                st.error(
-                    "Не удалось открыть видеоисточник. Если это камера/карта захвата — "
-                    "проверьте, что устройство подключено к этой машине и индекс указан "
-                    "верно (в облачной/тестовой среде физических камер обычно нет)."
-                )
-            else:
-                frame_slot = st.empty()
-                stats_slot = st.empty()
-                progress_slot = st.empty()
-
-                processed = 0
-                frame_idx = 0
-                total_counts = {name: 0 for name in class_names}
-                total_detections = 0
-                total_elapsed = 0.0
-
-                while processed < max_frames:
-                    ok, frame = cap.read()
-                    if not ok:
-                        break
-                    frame_idx += 1
-                    if (frame_idx - 1) % frame_skip != 0:
-                        continue
-
-                    annotated, stats, elapsed, n_tiles = run_inference(
-                        model, class_names, frame,
-                        mode=mode, conf=conf, tile_size=tile_size, overlap=overlap,
-                    )
-                    processed += 1
-                    total_detections += stats["total"]
-                    total_elapsed += elapsed
-                    for name in class_names:
-                        total_counts[name] += stats["counts"].get(name, 0)
-
-                    frame_slot.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB),
-                                      use_container_width=True,
-                                      caption=f"Кадр {frame_idx} | обработано {processed}/{max_frames}")
-
-                    with stats_slot.container():
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Детекций в кадре", stats["total"])
-                        m2.metric("Coverage %", f"{stats['coverage_pct']:.1f}%")
-                        m3.metric("Время кадра", f"{elapsed:.2f} с")
-
-                    progress_slot.progress(processed / max_frames)
-
-                cap.release()
-
-                if processed == 0:
-                    st.warning("Не удалось прочитать ни одного кадра из источника.")
-                else:
-                    st.success(f"Сеанс завершён: обработано {processed} кадров.")
-                    st.markdown("<div class='section-title'>Итог по сеансу</div>",
-                                unsafe_allow_html=True)
-                    s1, s2, s3 = st.columns(3)
-                    s1.metric("Всего детекций", total_detections)
-                    s2.metric("Среднее время/кадр", f"{total_elapsed / processed:.2f} с")
-                    s3.metric("Обработано кадров", processed)
-
-                    cols = st.columns(max(1, len(class_names)))
-                    for i, name in enumerate(class_names):
-                        cols[i].metric(name, total_counts[name])
-
-# ------------------------------------------------------------- О дроне ----
-with tab_about:
-    st.markdown(
-        """
-### Как это разворачивается на реальный дрон
-
-**Важно:** DJI O4 — это система видеопередачи (4-е поколение OcuSync), у неё нет
-собственного вычислительного модуля. Запустить модель детекции "внутри" O4
-физически невозможно — там негде исполнять код.
-
-Реальная рабочая схема:
-
-1. **Дрон** снимает поле и передаёт видео через O4 на пульт/очки.
-2. **Наземная станция** (ноутбук/мини-ПК) получает этот сигнал — либо через карту
-   видеозахвата (HDMI-выход пульта → USB-капture card → выглядит в системе как
-   обычная веб-камера), либо программно через DJI SDK/RTMP-поток.
-3. Этот **веб-демо** в режиме **«🎥 Видео / камера»** принимает ровно такой источник
-   (индекс видеоустройства или видеопоток) и гоняет через него ту же модель
-   детекции, что и для фото — покадрово, с тем же tiled-инференсом для больших
-   кадров.
-4. Результат (боксы, статистика, % засорённости) показывается на земле в реальном
-   времени — так же, как в этом интерфейсе.
-
-Это стандартная и единственно реалистичная для хакатон-MVP архитектура: **вычисления
-на земле, а не на борту**. Перенос модели непосредственно на дрон потребовал бы
-отдельного бортового компьютера (Jetson/аналог) — сознательно вне периметра этого
-MVP согласно приоритетам задачи.
-        """
-    )
+else:
+    st.info("Загрузите снимок с дрона, чтобы запустить детекцию.")
