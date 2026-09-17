@@ -1,0 +1,20 @@
+# сгенерированный YOLO-датасет — воспроизводится через src/prepare_dataset.py
+data/
+
+# артефакты обучения ultralytics (логи, промежуточные веса, батч-превью) —
+# кроме финального результата, который копируется в models/best.pt
+runs/
+
+# автоскачиваемые предобученные веса
+yolov8n.pt
+yolov8s.pt
+yolov8m.pt
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# служебное
+.claude/
